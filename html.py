@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 1. Page Configuration
-st.set_page_config(page_title="Dual Investment Hunter", layout="wide", page_icon="💰")
+st.set_page_config(page_title="Dual Investment Dashboard", layout="wide", page_icon="💰")
 
 # 2. Core Configuration
 COIN_CONFIG = {
@@ -142,7 +142,7 @@ def render_dashboard(data_list, title):
 
 # --- Main Application Flow ---
 
-st.title("🚀 Dual Investment Hunter")
+st.title("🚀 Dual Investment Dashboard")
 
 with st.sidebar:
     st.header("⚙️ Settings")
