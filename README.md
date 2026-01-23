@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 **Configure Proxy: Create a .env file in the root directory:**
 ```bash
-DEFAULT_PROXY=http://127.0.0.1:7897 or None
+DEFAULT_PROXY=http://127.0.0.1:12345 or None
 ```
 
 **Run the application:**
