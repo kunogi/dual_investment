@@ -22,5 +22,5 @@ DEFAULT_PROXY=http://127.0.0.1:7897 or None
 
 **Run the application:**
 ```bash
-streamlit run main.py
+streamlit run html.py
 ```
