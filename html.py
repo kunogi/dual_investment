@@ -64,7 +64,7 @@ COIN_CONFIG = {
     "BTC":  {"okx_id": 0,     "binance_symbol": "BTC",  "bitget_id": 2},
     "ETH":  {"okx_id": 2,     "binance_symbol": "ETH",  "bitget_id": 3},
     "SOL":  {"okx_id": 880,   "binance_symbol": "SOL",  "bitget_id": 235},
-    "DOGE": {"okx_id": 1054,  "binance_symbol": "DOGE", "bitget_id": 82},
+    # "DOGE": {"okx_id": 1054,  "binance_symbol": "DOGE", "bitget_id": 82},
     "XAUT": {"okx_id": 16789, "binance_symbol": None,   "bitget_id": None}
 }
 
