@@ -11,13 +11,15 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # 1. Page Configuration
-st.set_page_config(page_title="Dual Investment Dashboard", layout="wide", page_icon="💰")
+st.set_page_config(page_title="Dual Investment Hunter", layout="wide", page_icon="💰")
 
-# 2. Core Configuration
+# 2. Core Configuration (Add new assets here, use None if not supported by exchange)
 COIN_CONFIG = {
-    "BTC": {"okx_id": 0, "binance_symbol": "BTC", "bitget_id": 2},
-    "ETH": {"okx_id": 2, "binance_symbol": "ETH", "bitget_id": 3},
-    "SOL": {"okx_id": 880, "binance_symbol": "SOL", "bitget_id": 235}
+    "BTC":  {"okx_id": 0,     "binance_symbol": "BTC",  "bitget_id": 2},
+    "ETH":  {"okx_id": 2,     "binance_symbol": "ETH",  "bitget_id": 3},
+    "SOL":  {"okx_id": 880,   "binance_symbol": "SOL",  "bitget_id": 235},
+    # "DOGE": {"okx_id": 1054,  "binance_symbol": "DOGE", "bitget_id": 82},
+    "XAUT": {"okx_id": 16789, "binance_symbol": None,   "bitget_id": None}
 }
 
 # Load Proxy from Environment Variables
@@ -28,27 +30,22 @@ PROXY_SETTING = {"https": env_proxy, "http": env_proxy} if env_proxy else {}
 if "http_session" not in st.session_state:
     st.session_state.http_session = requests.Session()
 
-# --- Fetching Engine (Dynamic Proxy Support) ---
+# --- Fetching Engine (Dynamic Proxy & None-Safety) ---
 
 def fast_request(url, method="GET", params=None, json_data=None, use_proxy=False):
     headers = {"User-Agent": "Mozilla/5.0"}
-    # Apply proxy settings dynamically based on UI checkbox
     proxies = PROXY_SETTING if (use_proxy and PROXY_SETTING) else {}
-    
     try:
         if method == "GET":
-            resp = st.session_state.http_session.get(
-                url, params=params, headers=headers, timeout=5, proxies=proxies
-            )
+            resp = st.session_state.http_session.get(url, params=params, headers=headers, timeout=5, proxies=proxies)
         else:
-            resp = st.session_state.http_session.post(
-                url, json=json_data, headers=headers, timeout=5, proxies=proxies
-            )
+            resp = st.session_state.http_session.post(url, json=json_data, headers=headers, timeout=5, proxies=proxies)
         return resp.json()
     except:
         return None
 
 def get_okx(cfg, name, use_proxy):
+    if cfg.get("okx_id") is None: return []
     t = int(time.time() * 1000)
     url = f"https://www.okx.com/priapi/v2/sfp/dcd/products?currencyId={cfg['okx_id']}&altCurrencyId=7&dcdOptionType=PUT&t={t}"
     res = fast_request(url, use_proxy=use_proxy)
@@ -63,6 +60,7 @@ def get_okx(cfg, name, use_proxy):
     return parsed
 
 def get_binance(cfg, name, use_proxy):
+    if cfg.get("binance_symbol") is None: return []
     url = "https://www.binance.com/bapi/earn/v5/friendly/pos/dc/project/list"
     params = {"investmentAsset": "USDT", "targetAsset": cfg["binance_symbol"], "projectType": "DOWN", "sortType": "APY_DESC", "pageSize": 100}
     res = fast_request(url, params=params, use_proxy=use_proxy)
@@ -75,6 +73,7 @@ def get_binance(cfg, name, use_proxy):
     return parsed
 
 def get_bitget(cfg, name, use_proxy):
+    if cfg.get("bitget_id") is None: return []
     url = "https://www.bitget.cloud/v1/finance/dualInvest/ordinary/product/list"
     payload = {"productTokenId": cfg["bitget_id"], "tradeTokenId": 2, "direction": 0}
     res = fast_request(url, method="POST", json_data=payload, use_proxy=use_proxy)
@@ -91,7 +90,7 @@ def get_bitget(cfg, name, use_proxy):
 
 def render_dashboard(data_list, title):
     if not data_list:
-        st.warning(f"⚠️ No valid data found for {title}. Please check Proxy settings or API availability.")
+        st.warning(f"⚠️ No data found for {title}. Check Proxy or config.")
         return
 
     is_mixed = title == "Hybrid Dashboard"
@@ -101,11 +100,16 @@ def render_dashboard(data_list, title):
         st.subheader(f"📅 {title}: Alignment Matrix")
         grouped = defaultdict(lambda: defaultdict(dict))
         for item in data_list:
-            # Different alignment steps for BTC/ETH vs others
-            step = 25 if item["coin"] in ["BTC", "ETH"] else 1
-            strike_rounded = round(item["strike"] / step) * step
+            # Intelligent step selection
+            if item["coin"] in ["BTC", "ETH", "XAUT"]:
+                step = 25
+            elif item["coin"] == "SOL":
+                step = 5
+            else:
+                # Automatic step for small assets like DOGE
+                step = 0.01 if item["strike"] < 1 else 1
             
-            # RE-FIXED: Use 'Coin-Price' as key in Hybrid mode
+            strike_rounded = round(item["strike"] / step) * step if step != 0 else item["strike"]
             row_key = f"{item['coin']}-{strike_rounded}" if is_mixed else strike_rounded
             grouped[item["expiry"]][row_key][item["platform"]] = item["apy"]
 
@@ -113,10 +117,15 @@ def render_dashboard(data_list, title):
             dt_str = datetime.fromtimestamp(expiry // 1000).strftime("%m/%d %H:%M")
             st.markdown(f"**📍 Settlement: {dt_str}**")
             label = "Asset-Target" if is_mixed else "Target Price"
-            df_l = pd.DataFrame([{label: k, "OKX(%)": a.get("OKX"), "Binance(%)": a.get("Binance"), "Bitget(%)": a.get("Bitget")} 
-                                 for k, a in grouped[expiry].items()]).sort_values(label, ascending=False)
             
+            df_l = pd.DataFrame([{label: k, "OKX(%)": a.get("OKX"), "Binance(%)": a.get("Binance"), "Bitget(%)": a.get("Bitget")} 
+                                 for k, a in grouped[expiry].items()])
+            
+            # Smart Sorting: Show highest yield opportunities on top
             num_cols = ["OKX(%)", "Binance(%)", "Bitget(%)"]
+            df_l["_best_apy"] = df_l[num_cols].max(axis=1)
+            df_l = df_l.sort_values("_best_apy", ascending=False).drop(columns=["_best_apy"])
+
             st.dataframe(df_l.style.highlight_max(axis=1, subset=num_cols, color="#1e4620")
                          .format("{:.2f}", subset=num_cols, na_rep="--"), width="stretch", hide_index=True)
 
@@ -124,29 +133,24 @@ def render_dashboard(data_list, title):
         st.subheader("🏆 Global APY Ranking")
         rank_df = pd.DataFrame(data_list)
         rank_df["Settlement Time"] = rank_df["expiry"].apply(lambda x: datetime.fromtimestamp(x // 1000).strftime("%m/%d %H:%M"))
-        
-        # Adjust columns for ranking table
         cols = ["coin", "platform", "apy", "strike", "Settlement Time"] if is_mixed else ["platform", "apy", "strike", "Settlement Time"]
-        rank_df = rank_df[cols].sort_values("apy", ascending=False)
-        
-        # Renaming for better readability
-        col_rename = {"coin": "Asset", "platform": "Exchange", "apy": "APY(%)", "strike": "Target"}
-        rank_df = rank_df.rename(columns=col_rename)
+        rank_df = rank_df[cols].sort_values("apy", ascending=False).rename(columns={"coin": "Asset", "platform": "Exchange", "apy": "APY(%)", "strike": "Target"})
         
         try:
             styled_df = rank_df.style.background_gradient(subset=["APY(%)"], cmap="YlGn").format({"APY(%)": "{:.2f}"})
         except:
             styled_df = rank_df.style.format({"APY(%)": "{:.2f}"})
-            
         st.dataframe(styled_df, width="stretch", hide_index=True, height=800)
 
 # --- Main Application Flow ---
 
-st.title("🚀 Dual Investment Dashboard")
+st.title("🚀 Dual Investment Hunter")
 
 with st.sidebar:
     st.header("⚙️ Settings")
-    target = st.radio("View Mode:", ["Hybrid Dashboard", "BTC", "ETH", "SOL"], index=2)
+    # Dynamic menu generation from COIN_CONFIG
+    menu_options = ["Hybrid Dashboard"] + list(COIN_CONFIG.keys())
+    target = st.radio("View Mode:", menu_options, index=0)
     
     st.write("---")
     st.subheader("🌐 Proxy Control")
@@ -163,7 +167,6 @@ with st.sidebar:
     refresh_clicked = st.button(f"⚡ Refresh {target}", type="primary", use_container_width=True)
     st.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')}")
 
-# Single container for zero-flicker updates
 main_container = st.empty()
 
 with main_container.container():
@@ -182,4 +185,4 @@ with main_container.container():
     
     render_dashboard(all_data, target)
     if refresh_clicked:
-        st.toast(f"{target} data sync complete!")
+        st.toast(f"{target} synchronization complete!")
