@@ -6,7 +6,7 @@ from datetime import datetime
 OKX_CURRENCY_MAP = {
     "BTC": 0,
     "ETH": 2,
-    "SOL": 880,
+    "XAUT": 16789,
 }
 
 def fetch_okx_products(coin, currency_id):
@@ -63,5 +63,5 @@ def fetch_okx_products(coin, currency_id):
     return []
 
 if __name__ == "__main__":
-    for coin in ["BTC", "ETH", "SOL"]:
+    for coin in ["BTC", "ETH", "XAUT"]:
         fetch_okx_products(coin, OKX_CURRENCY_MAP[coin])
