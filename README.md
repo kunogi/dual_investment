@@ -53,8 +53,14 @@ pip install -r requirements.txt
 ```
 
 **Configure Proxy: Create a .env file in the root directory:**
+
+GO TO https://www.okx.com/zh-hans/earn/dual
+
+
+COPY the param [Authorization] of the request https://www.okx.com/priapi/v2/sfp/dcd/products from the header
 ```bash
 DEFAULT_PROXY=http://127.0.0.1:12345 or None
+OKX_AUTH=--------Copy From HTTP Request------
 ```
 
 **Run the application:**
