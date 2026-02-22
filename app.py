@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 import time
 import os
-from datetime import datetime, date
+from datetime import datetime, date, timedelta, timezone
 from dotenv import load_dotenv
 from curl_cffi import requests as requests_cffi
 
@@ -26,13 +26,13 @@ LANG_DICT = {
     "zh": {
         "page_title": "双币投资看板 Pro", "sidebar_ctrl": "🎮 控制面板", "mode_toggle": "切换至【高卖】模式",
         "buy_low": "低买", "sell_high": "高卖", "asset_select": "选择币种:",
-        "proxy_ctrl": "🌐 独立代理控制", "sync_btn": "⚡ 同步数据", "matrix_title": "📊 交易所对齐矩阵",
+        "proxy_ctrl": "🌐 独立代理控制", "sync_btn": "⚡ 同步数据", "matrix_title": "📊 交易所对齐矩阵 (基于真实到手收益)",
         "rank_title": "🏆 全网年化收益排行 (Top 30)", "target_price": "目标价", "dist_price": "距离%", "last_update": "⏱️ 最后更新:", "no_data": "⚠️ 未找到数据"
     },
     "en": {
         "page_title": "Dual Investment Pro", "sidebar_ctrl": "Dashboard Control", "mode_toggle": "Switch to SELL HIGH mode",
         "buy_low": "Buy Low", "sell_high": "Sell High", "asset_select": "Asset:",
-        "proxy_ctrl": "Proxy Control", "sync_btn": "Sync Data", "matrix_title": "Alignment Matrix",
+        "proxy_ctrl": "Proxy Control", "sync_btn": "Sync Data", "matrix_title": "Alignment Matrix (Real APY)",
         "rank_title": "APY Rankings (Top 30)", "target_price": "Strike", "dist_price": "Dist.%", "last_update": "Last Updated:", "no_data": "No data found."
     }
 }
@@ -73,7 +73,6 @@ def get_okx(cfg, name, use_proxy, mode):
         base_id = 7    
 
     url = f"https://www.okx.com/priapi/v2/sfp/dcd/products?currencyId={inv_id}&altCurrencyId={base_id}&dcdOptionType={opt_type}&t={int(time.time()*1000)}"
-    
     headers = {
         "accept": "application/json", 
         "app-type": "web", 
@@ -81,14 +80,11 @@ def get_okx(cfg, name, use_proxy, mode):
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 
         "authorization": okx_auth
     }
-    
     proxies = PROXY_SETTING if use_proxy else {}
     try:
         resp = requests.get(url, headers=headers, timeout=10, proxies=proxies)
         if resp.status_code == 200:
-            data = resp.json().get("data", {})
-            products = data.get("products", [])
-            
+            products = resp.json().get("data", {}).get("products", [])
             if not products and mode == "Sell High":
                 alt_url = f"https://www.okx.com/priapi/v2/sfp/dcd/products?currencyId=7&altCurrencyId={c_id}&dcdOptionType={opt_type}&t={int(time.time()*1000)}"
                 resp = requests.get(alt_url, headers=headers, timeout=10, proxies=proxies)
@@ -103,12 +99,13 @@ def get_okx(cfg, name, use_proxy, mode):
                         "coin": name, 
                         "strike": float(sk), 
                         "apy": float(ay), 
+                        "raw_apy": float(ay), # OKX不虚标，真实与页面一致
                         "expiry": int(p["expiryTime"]), 
                         "platform": "OKX"
                     })
             return res
     except Exception as e:
-        print(f"OKX Error: {e}")
+        pass
     return []
 
 def get_bitget(cfg, name, use_proxy, mode):
@@ -127,7 +124,11 @@ def get_bitget(cfg, name, use_proxy, mode):
                 if dr.get("code") == "200" and dr.get("data"):
                     for group in dr["data"]:
                         for p in group.get("productList", []):
-                            all_products.append({"coin": name, "strike": float(p["targetPrice"]), "apy": float(p["apy"]), "expiry": int(ts), "platform": "Bitget"})
+                            all_products.append({
+                                "coin": name, "strike": float(p["targetPrice"]), 
+                                "apy": float(p["apy"]), "raw_apy": float(p["apy"]), 
+                                "expiry": int(ts), "platform": "Bitget"
+                            })
     except: pass
     return all_products
 
@@ -141,7 +142,11 @@ def get_binance(cfg, name, use_proxy, mode):
     proxies = PROXY_SETTING if use_proxy else {}
     try:
         r = requests.get(url, params=params, timeout=10, proxies=proxies).json()
-        return [{"coin": name, "strike": float(i["strikePrice"]), "apy": float(i["apr"]) * 100, "expiry": int(i["settleTime"]), "platform": "Binance"} for i in r.get("data", {}).get("list", [])]
+        return [{
+            "coin": name, "strike": float(i["strikePrice"]), 
+            "apy": float(i["apr"]) * 100, "raw_apy": float(i["apr"]) * 100, 
+            "expiry": int(i["settleTime"]), "platform": "Binance"
+        } for i in r.get("data", {}).get("list", [])]
     except: return []
 
 def get_gate(cfg, name, use_proxy, mode):
@@ -154,13 +159,44 @@ def get_gate(cfg, name, use_proxy, mode):
         resp = requests_cffi.get(url, impersonate="edge101", proxies=proxies, timeout=10)
         if resp.status_code == 200:
             res = []
+            current_ts_ms = int(time.time() * 1000)
+            
             for i in resp.json().get("data", []):
                 if int(i.get("min_vip_level", 0)) > 0: continue
                 strike = i.get("exercise_price") or i.get("strike_price")
-                apy_val = float(i.get("apy_display") or 0) * 100
+                apy_display = float(i.get("apy_display") or 0) * 100
                 expiry_val = (i.get("delivery_timest") or i.get("end_timest")) * 1000
-                if strike and apy_val > 0:
-                    res.append({"coin": name, "strike": float(strike), "apy": apy_val, "expiry": int(expiry_val), "platform": "Gate"})
+                
+                if strike and apy_display > 0:
+                    # --- 核心黑科技：扣除Gate白嫖占用资金的真实年化计算 ---
+                    tz_utc_8 = timezone(timedelta(hours=8))
+                    now_utc8 = datetime.fromtimestamp(current_ts_ms / 1000.0, tz=tz_utc_8)
+                    
+                    # Gate的计息起点永远是下一个 UTC+8 的 16:00
+                    cutoff_today = now_utc8.replace(hour=16, minute=0, second=0, microsecond=0)
+                    if now_utc8 >= cutoff_today:
+                        next_cutoff = cutoff_today + timedelta(days=1)
+                    else:
+                        next_cutoff = cutoff_today
+                        
+                    next_cutoff_ts = next_cutoff.timestamp() * 1000.0
+                    
+                    # 实际资金锁死的小时数 vs Gate给你发利息的小时数
+                    locked_hours = (expiry_val - current_ts_ms) / 3600000.0
+                    paid_hours = (expiry_val - next_cutoff_ts) / 3600000.0
+                    
+                    real_apy = apy_display
+                    if locked_hours > 0 and paid_hours > 0 and paid_hours < locked_hours:
+                        real_apy = apy_display * (paid_hours / locked_hours)
+                    elif paid_hours <= 0:
+                        real_apy = 0 # 极端情况：如果在交割前几小时买入，利息为0
+                        
+                    res.append({
+                        "coin": name, "strike": float(strike), 
+                        "apy": real_apy,          # 挤掉水分的真实年化（供给雷达和矩阵使用）
+                        "raw_apy": apy_display,   # 页面骗人的高年化（供给排行榜对比用）
+                        "expiry": int(expiry_val), "platform": "Gate"
+                    })
             return res
     except: pass
     return []
@@ -193,89 +229,68 @@ with st.spinner("🚀 同步中..."):
 if not all_data:
     st.warning(L["no_data"])
 else:
-    # 基础数据预处理
     df = pd.DataFrame(all_data)
     df['expiry_date'] = df['expiry'].apply(lambda x: date.fromtimestamp(x // 1000))
     dist_col = L["dist_price"]
     df[dist_col] = df.apply(lambda r: ((r['strike'] - current_prices.get(r['coin'], 0)) / (current_prices.get(r['coin']) or 1)) * 100, axis=1).round(1)
     df['display_name'] = df.apply(lambda r: f"{r['coin']}-{r['expiry_date'].strftime('%m%d')}", axis=1)
 
-    # 1. 渲染页面头部
     st.title(L["page_title"])
     st.caption(f"{L['last_update']} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # --- 【位置调换】先渲染智能监控雷达 ---
-    # --- 6. 智能监控雷达：发现倒挂与高性价比安全垫 ---
-    # --- 6. 智能监控雷达：发现倒挂与高性价比安全垫 ---
+    # --- 智能监控雷达 ---
     st.markdown("---")
     st.subheader("🕵️‍♂️ 智能监控雷达 (Smart Alerts)")
 
-    inv_alerts = [] # 专门装绝对倒挂的列表
-    val_alerts = [] # 专门装高性价比的列表
-    
+    inv_alerts, val_alerts = [], []
     for (plat, coin, exp), group in df.groupby(['platform', 'coin', 'expiry_date']):
         g = group.sort_values('strike', ascending=invest_mode).reset_index(drop=True)
         for i in range(1, len(g)):
-            prev = g.iloc[i-1] 
-            curr = g.iloc[i]   
+            prev, curr = g.iloc[i-1], g.iloc[i]   
             
             apy_diff = prev['apy'] - curr['apy']
             dist_gain = abs(curr[dist_col] - prev[dist_col]) 
             
-            if dist_gain == 0: 
-                continue
-                
+            if dist_gain == 0: continue
             asset_lbl = f"{coin}-{exp.strftime('%m%d')}"
             
             if apy_diff < 0:
                 inv_alerts.append({
-                    "平台": plat,
-                    "标的": asset_lbl,
+                    "平台": plat, "标的": asset_lbl,
                     "档位对比": f"{prev['strike']:g} ({prev['apy']:.1f}%) ➡️ {curr['strike']:g} ({curr['apy']:.1f}%)",
-                    "分析结论": f"安全垫增加 {dist_gain:.1f}%, 收益倒挂高出 {abs(apy_diff):.1f}%",
-                    "_sort_diff": abs(apy_diff)  # 隐藏排序列：倒挂差值
+                    "分析结论": f"安全垫增加 {dist_gain:.1f}%, 真实收益倒挂高出 {abs(apy_diff):.1f}%",
+                    "_sort_diff": abs(apy_diff)
                 })
             else:
                 cost_effectiveness = 999 if apy_diff == 0 else dist_gain / apy_diff
                 if cost_effectiveness >= 1.5 and dist_gain >= 0.5 and prev['apy'] > 5.0: 
                     val_alerts.append({
-                        "平台": plat,
-                        "标的": asset_lbl,
+                        "平台": plat, "标的": asset_lbl,
                         "档位对比": f"{prev['strike']:g} ({prev['apy']:.1f}%) ➡️ {curr['strike']:g} ({curr['apy']:.1f}%)",
-                        "分析结论": f"牺牲 {apy_diff:.1f}% 年化换取 {dist_gain:.1f}% 避险空间",
-                        "_sort_ce": cost_effectiveness, # 隐藏排序列：性价比得分
-                        "_sort_dist": dist_gain,        # 隐藏排序列：避险空间
-                        "_sort_apy": prev['apy']        # 隐藏排序列：绝对收益
+                        "分析结论": f"牺牲 {apy_diff:.1f}% 真实年化换取 {dist_gain:.1f}% 避险空间",
+                        "_sort_ce": cost_effectiveness
                     })
 
-    # UI 渲染：双列展示监控结果
     col_alert1, col_alert2 = st.columns(2)
-    
     with col_alert1:
         if inv_alerts:
-            # 直接在独立的 DataFrame 上进行排序
             inv_df = pd.DataFrame(inv_alerts).sort_values(by="_sort_diff", ascending=False)
-            
-            st.error(f"🔴 扫到 {len(inv_df)} 个绝对倒挂机会！(已按收益差值排序)")
-            # 删掉类型列（因为已经分开了不需要了）和隐藏排序列
+            st.error(f"🔴 扫到 {len(inv_df)} 个绝对倒挂机会！(已基于真实收益排雷)")
             st.dataframe(inv_df.drop(columns=["_sort_diff"]), use_container_width=True, hide_index=True)
         else:
             st.info("✅ 暂无绝对倒挂。")
             
     with col_alert2:
         if val_alerts:
-            # 默认按照【性价比得分(衰减斜率)】从高到低排序
             val_df = pd.DataFrame(val_alerts).sort_values(by="_sort_ce", ascending=False)
-            
-            st.success(f"🟢 扫到 {len(val_df)} 个高性价比档位！(已按白嫖性价比排序)")
-            # 删掉类型列和所有的隐藏排序列
-            st.dataframe(val_df.drop(columns=["_sort_ce", "_sort_dist", "_sort_apy"]), use_container_width=True, hide_index=True)
+            st.success(f"🟢 扫到 {len(val_df)} 个高性价比档位！(已剔除注水数据)")
+            st.dataframe(val_df.drop(columns=["_sort_ce"]), use_container_width=True, hide_index=True)
         else:
             st.info("✅ 暂无收益衰减异常的高性价比档位。")
 
-    st.markdown("---") # 在雷达和原有矩阵之间加一条分割线
+    st.markdown("---")
 
-    # --- 后续的矩阵和排行代码 (保持不变) ---
+    # --- 矩阵与排行 ---
     col_left, col_right = st.columns([1.35, 0.65])
     
     with col_left:
@@ -290,38 +305,21 @@ else:
 
     with col_right:
         st.subheader(L["rank_title"])
+        # 排行榜基于真实 APY 排序
         rank_df = df.sort_values("apy", ascending=False).head(30)
         
-        display_rank = rank_df[['display_name', 'platform', 'apy', 'strike']].copy()
-        display_rank.columns = ['Asset', 'Ex', 'APY', L['target_price']]
-        display_rank['APY'] = display_rank['APY'].apply(lambda x: f"{x:.1f}%")
-        display_rank[L['target_price']] = display_rank[L['target_price']].apply(lambda x: f"{x:g}")
+        display_rank = rank_df[['display_name', 'platform', 'apy', 'raw_apy', 'strike']].copy()
+        display_rank.columns = ['Asset', 'Ex', '真实APY', '页面标称', L['target_price']]
         
-        display_rank.set_index('Asset', inplace=True)
-        st.table(display_rank)
-
-    st.markdown("---") # 在雷达和原有矩阵之间加一条分割线
-
-    # --- 【位置调换】后渲染原有的矩阵与排行榜 ---
-    col_left, col_right = st.columns([1.35, 0.65])
-    
-    with col_left:
-        st.subheader(L["matrix_title"])
-        for exp_date in sorted(df['expiry_date'].unique()):
-            st.write(f"📅 **{exp_date.strftime('%m/%d')}**")
-            sub = df[df['expiry_date'] == exp_date].copy()
-            pivot = sub.pivot_table(index=['coin', 'strike', dist_col], columns='platform', values='apy', aggfunc='max').reindex(columns=['Binance', 'OKX', 'Bitget', 'Gate'])
-            pivot['max_val'] = pivot.max(axis=1)
-            pivot = pivot.sort_values('max_val', ascending=False).drop(columns=['max_val'])
-            st.dataframe(pivot.style.highlight_max(axis=1, color="#1e4620").format("{:.1f}%", na_rep="--"), width="stretch")
-
-    with col_right:
-        st.subheader(L["rank_title"])
-        rank_df = df.sort_values("apy", ascending=False).head(30)
+        display_rank['真实APY'] = display_rank['真实APY'].apply(lambda x: f"{x:.1f}%")
         
-        display_rank = rank_df[['display_name', 'platform', 'apy', 'strike']].copy()
-        display_rank.columns = ['Asset', 'Ex', 'APY', L['target_price']]
-        display_rank['APY'] = display_rank['APY'].apply(lambda x: f"{x:.1f}%")
+        # 针对虚标数据打上显眼的警告标识
+        def format_raw(row):
+            if row['Ex'] == 'Gate' and abs(row['页面标称'] - float(row['真实APY'].strip('%'))) > 0.1:
+                return f"⚠️ {row['页面标称']:.1f}%"
+            return f"{row['页面标称']:.1f}%"
+            
+        display_rank['页面标称'] = display_rank.apply(format_raw, axis=1)
         display_rank[L['target_price']] = display_rank[L['target_price']].apply(lambda x: f"{x:g}")
         
         display_rank.set_index('Asset', inplace=True)
