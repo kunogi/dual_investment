@@ -52,7 +52,6 @@ okx_auth = os.getenv("OKX_AUTH")
 PROXY_SETTING = {"https": env_proxy, "http": env_proxy} if env_proxy else {}
 
 # --- 3. 抓取引擎 ---
-
 def get_live_prices(coin, use_proxy):
     proxies = PROXY_SETTING if use_proxy else {}
     try:
@@ -64,15 +63,14 @@ def get_okx(cfg, name, use_proxy, mode):
     c_id = cfg.get("okx_id")
     if c_id is None: return []
     
-    # 核心修复：OKX 高卖/低买的参数对齐逻辑
     if mode == "Buy Low":
         opt_type = "PUT"
-        inv_id = c_id  # 投资币种 ID (如 BTC 是 0)
-        base_id = 7    # 结算币种 ID (USDT 是 7)
+        inv_id = c_id  
+        base_id = 7    
     else:
         opt_type = "CALL"
         inv_id = c_id
-        base_id = 7    # 高卖通常也是以 USDT 结算，但 OKX 后端对 CALL 的映射有时不同
+        base_id = 7    
 
     url = f"https://www.okx.com/priapi/v2/sfp/dcd/products?currencyId={inv_id}&altCurrencyId={base_id}&dcdOptionType={opt_type}&t={int(time.time()*1000)}"
     
@@ -90,7 +88,7 @@ def get_okx(cfg, name, use_proxy, mode):
         if resp.status_code == 200:
             data = resp.json().get("data", {})
             products = data.get("products", [])
-            # 如果 products 为空，尝试另一种 ID 组合（针对某些高卖对）
+            
             if not products and mode == "Sell High":
                 alt_url = f"https://www.okx.com/priapi/v2/sfp/dcd/products?currencyId=7&altCurrencyId={c_id}&dcdOptionType={opt_type}&t={int(time.time()*1000)}"
                 resp = requests.get(alt_url, headers=headers, timeout=10, proxies=proxies)
@@ -179,7 +177,7 @@ with st.sidebar:
     p_bin, p_okx, p_bit, p_gate = st.checkbox("Binance Proxy", True), st.checkbox("OKX Proxy", True), st.checkbox("Bitget Proxy", True), st.checkbox("Gate Proxy", True)
     st.button(L["sync_btn"], type="primary", width="stretch")
 
-# --- 5. 数据处理 ---
+# --- 5. 数据处理与页面渲染 ---
 all_data, current_prices = [], {}
 items = COIN_CONFIG.items() if "Hybrid" in target_coin else [(target_coin, COIN_CONFIG[target_coin])]
 
@@ -195,15 +193,89 @@ with st.spinner("🚀 同步中..."):
 if not all_data:
     st.warning(L["no_data"])
 else:
+    # 基础数据预处理
     df = pd.DataFrame(all_data)
     df['expiry_date'] = df['expiry'].apply(lambda x: date.fromtimestamp(x // 1000))
     dist_col = L["dist_price"]
     df[dist_col] = df.apply(lambda r: ((r['strike'] - current_prices.get(r['coin'], 0)) / (current_prices.get(r['coin']) or 1)) * 100, axis=1).round(1)
     df['display_name'] = df.apply(lambda r: f"{r['coin']}-{r['expiry_date'].strftime('%m%d')}", axis=1)
 
+    # 1. 渲染页面头部
     st.title(L["page_title"])
     st.caption(f"{L['last_update']} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
+    # --- 【位置调换】先渲染智能监控雷达 ---
+    # --- 6. 智能监控雷达：发现倒挂与高性价比安全垫 ---
+    # --- 6. 智能监控雷达：发现倒挂与高性价比安全垫 ---
+    st.markdown("---")
+    st.subheader("🕵️‍♂️ 智能监控雷达 (Smart Alerts)")
+
+    inv_alerts = [] # 专门装绝对倒挂的列表
+    val_alerts = [] # 专门装高性价比的列表
+    
+    for (plat, coin, exp), group in df.groupby(['platform', 'coin', 'expiry_date']):
+        g = group.sort_values('strike', ascending=invest_mode).reset_index(drop=True)
+        for i in range(1, len(g)):
+            prev = g.iloc[i-1] 
+            curr = g.iloc[i]   
+            
+            apy_diff = prev['apy'] - curr['apy']
+            dist_gain = abs(curr[dist_col] - prev[dist_col]) 
+            
+            if dist_gain == 0: 
+                continue
+                
+            asset_lbl = f"{coin}-{exp.strftime('%m%d')}"
+            
+            if apy_diff < 0:
+                inv_alerts.append({
+                    "平台": plat,
+                    "标的": asset_lbl,
+                    "档位对比": f"{prev['strike']:g} ({prev['apy']:.1f}%) ➡️ {curr['strike']:g} ({curr['apy']:.1f}%)",
+                    "分析结论": f"安全垫增加 {dist_gain:.1f}%, 收益倒挂高出 {abs(apy_diff):.1f}%",
+                    "_sort_diff": abs(apy_diff)  # 隐藏排序列：倒挂差值
+                })
+            else:
+                cost_effectiveness = 999 if apy_diff == 0 else dist_gain / apy_diff
+                if cost_effectiveness >= 1.5 and dist_gain >= 0.5 and prev['apy'] > 5.0: 
+                    val_alerts.append({
+                        "平台": plat,
+                        "标的": asset_lbl,
+                        "档位对比": f"{prev['strike']:g} ({prev['apy']:.1f}%) ➡️ {curr['strike']:g} ({curr['apy']:.1f}%)",
+                        "分析结论": f"牺牲 {apy_diff:.1f}% 年化换取 {dist_gain:.1f}% 避险空间",
+                        "_sort_ce": cost_effectiveness, # 隐藏排序列：性价比得分
+                        "_sort_dist": dist_gain,        # 隐藏排序列：避险空间
+                        "_sort_apy": prev['apy']        # 隐藏排序列：绝对收益
+                    })
+
+    # UI 渲染：双列展示监控结果
+    col_alert1, col_alert2 = st.columns(2)
+    
+    with col_alert1:
+        if inv_alerts:
+            # 直接在独立的 DataFrame 上进行排序
+            inv_df = pd.DataFrame(inv_alerts).sort_values(by="_sort_diff", ascending=False)
+            
+            st.error(f"🔴 扫到 {len(inv_df)} 个绝对倒挂机会！(已按收益差值排序)")
+            # 删掉类型列（因为已经分开了不需要了）和隐藏排序列
+            st.dataframe(inv_df.drop(columns=["_sort_diff"]), use_container_width=True, hide_index=True)
+        else:
+            st.info("✅ 暂无绝对倒挂。")
+            
+    with col_alert2:
+        if val_alerts:
+            # 默认按照【性价比得分(衰减斜率)】从高到低排序
+            val_df = pd.DataFrame(val_alerts).sort_values(by="_sort_ce", ascending=False)
+            
+            st.success(f"🟢 扫到 {len(val_df)} 个高性价比档位！(已按白嫖性价比排序)")
+            # 删掉类型列和所有的隐藏排序列
+            st.dataframe(val_df.drop(columns=["_sort_ce", "_sort_dist", "_sort_apy"]), use_container_width=True, hide_index=True)
+        else:
+            st.info("✅ 暂无收益衰减异常的高性价比档位。")
+
+    st.markdown("---") # 在雷达和原有矩阵之间加一条分割线
+
+    # --- 后续的矩阵和排行代码 (保持不变) ---
     col_left, col_right = st.columns([1.35, 0.65])
     
     with col_left:
@@ -220,13 +292,37 @@ else:
         st.subheader(L["rank_title"])
         rank_df = df.sort_values("apy", ascending=False).head(30)
         
-        # --- 彻底去掉索引列的关键操作 ---
         display_rank = rank_df[['display_name', 'platform', 'apy', 'strike']].copy()
         display_rank.columns = ['Asset', 'Ex', 'APY', L['target_price']]
         display_rank['APY'] = display_rank['APY'].apply(lambda x: f"{x:.1f}%")
         display_rank[L['target_price']] = display_rank[L['target_price']].apply(lambda x: f"{x:g}")
         
-        # 将 'Asset' 设为索引，st.table 就会以它为第一列，且不再显示那列奇怪的数字
         display_rank.set_index('Asset', inplace=True)
+        st.table(display_rank)
+
+    st.markdown("---") # 在雷达和原有矩阵之间加一条分割线
+
+    # --- 【位置调换】后渲染原有的矩阵与排行榜 ---
+    col_left, col_right = st.columns([1.35, 0.65])
+    
+    with col_left:
+        st.subheader(L["matrix_title"])
+        for exp_date in sorted(df['expiry_date'].unique()):
+            st.write(f"📅 **{exp_date.strftime('%m/%d')}**")
+            sub = df[df['expiry_date'] == exp_date].copy()
+            pivot = sub.pivot_table(index=['coin', 'strike', dist_col], columns='platform', values='apy', aggfunc='max').reindex(columns=['Binance', 'OKX', 'Bitget', 'Gate'])
+            pivot['max_val'] = pivot.max(axis=1)
+            pivot = pivot.sort_values('max_val', ascending=False).drop(columns=['max_val'])
+            st.dataframe(pivot.style.highlight_max(axis=1, color="#1e4620").format("{:.1f}%", na_rep="--"), width="stretch")
+
+    with col_right:
+        st.subheader(L["rank_title"])
+        rank_df = df.sort_values("apy", ascending=False).head(30)
         
+        display_rank = rank_df[['display_name', 'platform', 'apy', 'strike']].copy()
+        display_rank.columns = ['Asset', 'Ex', 'APY', L['target_price']]
+        display_rank['APY'] = display_rank['APY'].apply(lambda x: f"{x:.1f}%")
+        display_rank[L['target_price']] = display_rank[L['target_price']].apply(lambda x: f"{x:g}")
+        
+        display_rank.set_index('Asset', inplace=True)
         st.table(display_rank)
